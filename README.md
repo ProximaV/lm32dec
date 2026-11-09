@@ -4,7 +4,7 @@
 
 The plugin provides native dual-endian support:
 * **Big-Endian**: Standard Lattice Semiconductor softcore designs, FPGA SoCs (Milkymist, White Rabbit, RTEMS, Linux), and QEMU LM32 targets.
-* **Little-Endian**: Proprietary embedded security coprocessors, including PlayStation Vita coprocessor firmware (e.g. `80010001_dec.self`).
+* **Little-Endian**: Proprietary embedded security coprocessor.
 
 The IDA processor module is leveraged strictly for instruction decoding (`insn_t`), while lifting, static single assignment (SSA) def-use web analysis, virtual variable synthesis, calling convention recovery, control-flow restructuring, and C code generation are entirely custom:
 
@@ -85,30 +85,30 @@ int sub_450(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int 
 
 ## Key Capabilities & Architectural Enhancements
 
-### 1. Dual-Endian Decoding & Zero-Flag IR Lifter ([`lm32dec/decoder.py`](file:///c:/Users/Proxima/source/repos/ida-sdk/src/plugins/lm32dec/lm32dec/decoder.py), [`lm32dec/lifter.py`](file:///c:/Users/Proxima/source/repos/ida-sdk/src/plugins/lm32dec/lm32dec/lifter.py))
+### 1. Dual-Endian Decoding & Zero-Flag IR Lifter 
 * **Fixed 32-bit Instruction Decoding**: Decodes all LM32 32-bit instructions with full support for both Big-Endian and Little-Endian byte orders.
 * **Zero-Flag Architecture Support**: LM32 features no status/condition flags; compare-and-branch instructions (`be`, `bne`, `bge`, `bgeu`, `bgt`, `bgtu`) test registers directly. The lifter models these cleanly as high-level relational expressions.
 * **Hardwired Zero Register (`r0`)**: Reads from `r0` fold to literal `0`; writes to `r0` (used for discards or flags) are preserved as pure side effects or safely eliminated.
 * **Switch Table Identification**: Recognizes indirect branch sequences (`lshift -> add -> lw -> b rX`) and extracts jump tables, case bounds, and dispatch targets.
 
-### 2. Stack Frame Analysis & Callee-Saved Register Stripping ([`lm32dec/frame.py`](file:///c:/Users/Proxima/source/repos/ida-sdk/src/plugins/lm32dec/lm32dec/frame.py))
+### 2. Stack Frame Analysis & Callee-Saved Register Stripping 
 * **Prologue & Epilogue Identification**: Identifies stack allocations (`addi r28, r28, -frame_size`), frame pointer updates (`addi r27, r28, ...`), and stack deallocations.
 * **Callee-Saved Spill Elimination**: Detects prologue saves and epilogue restores for `r11`–`r25`, `gp` (`r26`), `fp` (`r27`), and `ra` (`r29`), completely stripping them from the pseudocode AST.
 * **Stack Variable Categorization**: Categorizes negative and positive frame offsets into local variables (`var_X`) and incoming stack arguments (`arg_X`).
 
-### 3. LM32 EABI Calling Convention & Signature Synthesis ([`lm32dec/abi.py`](file:///c:/Users/Proxima/source/repos/ida-sdk/src/plugins/lm32dec/lm32dec/abi.py), [`lm32dec/callargs.py`](file:///c:/Users/Proxima/source/repos/ida-sdk/src/plugins/lm32dec/lm32dec/callargs.py))
+### 3. LM32 EABI Calling Convention & Signature Synthesis 
 * **Register Arguments (`r1`–`r8`)**: Backward iterative dataflow liveness analysis detects active register parameters at function entry (`a0` through `a7`).
 * **Stack Arguments (`arg_0, arg_4, ...`)**: Incoming stack slots accessed above the caller's frame are promoted to function parameters.
 * **Return Value Inference**: Verifies reaching definitions of `r1` (32-bit) and `r2` (64-bit high word) at return sites (`b r29`), inferring `void`, `int`, or pointer return types.
 * **Caller Consensus & Call Argument Folding**: Cross-references call sites across the database to reach consensus on parameter counts, folding reaching argument assignments directly into call statements (`sub_20(a0, a1 + 1)`).
 
-### 4. SSA-Style Def-Use Webs & Virtual Variable Recovery ([`lm32dec/vars.py`](file:///c:/Users/Proxima/source/repos/ida-sdk/src/plugins/lm32dec/lm32dec/vars.py))
+### 4. SSA-Style Def-Use Webs & Virtual Variable Recovery 
 * **Iterative Reaching Definitions**: Tracks active register definitions, kills, and clobbers (including call clobbers) across basic blocks.
 * **Union-Find Live Range Splitting**: Merges reaching definitions and uses into disjoint live ranges, splitting independent reuses of machine registers into separate virtual variables (`v0`, `v1`, ...).
 * **Copy Propagation & Inlining**: Folds single-use register copies (`v1 = v0`) and pure address arithmetic directly into memory dereferences and call arguments.
 * **Dead Assignment Elimination**: Eliminates unused intermediate assignments while safeguarding return value registers (`r1`/`r2`).
 
-### 5. Hex-Rays Style Memory & Symbol Representation ([`lm32dec/cgen.py`](file:///c:/Users/Proxima/source/repos/ida-sdk/src/plugins/lm32dec/lm32dec/cgen.py))
+### 5. Hex-Rays Style Memory & Symbol Representation 
 * **Standard Type Casts**:
   * 32-bit: `*(_DWORD *)addr`
   * 16-bit unsigned: `*(_WORD *)addr`
@@ -119,7 +119,7 @@ int sub_450(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int 
 * **Symbolic Name Resolution**: Addresses matching named data or code symbols in IDA render directly as identifiers.
 * **String Literals**: Quoted C string literals are automatically formatted and escaped for pointer arguments.
 
-### 6. Interactive Decompiler View & UX ([`lm32dec/view.py`](file:///c:/Users/Proxima/source/repos/ida-sdk/src/plugins/lm32dec/lm32dec/view.py), [`lm32dec/highlight.py`](file:///c:/Users/Proxima/source/repos/ida-sdk/src/plugins/lm32dec/lm32dec/highlight.py))
+### 6. Interactive Decompiler View & UX 
 * **Dense Multi-Instruction EA Anchoring**: 100% of contributing instruction EAs are mapped bidirectionally (`line_to_eas` and `ea_to_line`), ensuring seamless navigation across all basic blocks.
 * **Bidirectional Disassembly $\leftrightarrow$ Pseudocode Synchronization**:
   * Selecting any instruction in `IDA View-A` immediately scrolls and highlights the corresponding decompiled line.
@@ -150,14 +150,14 @@ int sub_450(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int 
   * **`F5`**: Refresh decompilation.
   * **`Ctrl-F5`**: Batch decompile entire database and export to a `.c` file.
 
-### 8. Netnode & Desktop Layout Persistence ([`lm32dec/db.py`](file:///c:/Users/Proxima/source/repos/ida-sdk/src/plugins/lm32dec/lm32dec/db.py))
+### 8. Netnode & Desktop Layout Persistence
 * **Database Netnode (`$ lm32dec`)**: All analyst modifications (variable renames, types, function prototypes, immediate formatting, comments, if-inversions, and sync preferences) are saved directly in the `.idb` / `.i64` file.
 * **Desktop Layout Manager**: Restores open decompiler tabs, docking positions, and cursor locations upon reopening databases.
 * **Headless Fallback**: Transparent in-memory storage fallback for command-line execution and headless unit tests.
 
 ### 9. High Performance
 * **Single Function**: ~7.7 ms average decompilation time.
-* **Full Firmware Benchmark**: Decompiled all 251 functions (20,789 lines of C) in `80010001_dec.self.i64` in **1.94 seconds** with 100% instruction EA anchoring.
+* **Full Firmware Benchmark**: Decompiled all 251 functions (20,789 lines of C) in `sample.i64` in **1.94 seconds** with 100% instruction EA anchoring.
 
 ---
 
@@ -283,5 +283,4 @@ All 7 test suites verify:
 ## Credits & License
 
 * Lattice Semiconductor **LatticeMico32 Processor Reference Manual**.
-* Architecture and UX design inspired by [`f00ddec`](file:///c:/Users/Proxima/source/repos/ida-sdk/src/plugins/f00ddec/README.md), [`spudec`](https://github.com/zecoxao/spudec), and [`rl78dec`](https://github.com/zecoxao/rl78dec).
 * Licensed under the **MIT License**.
