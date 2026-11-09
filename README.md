@@ -244,8 +244,8 @@ Decompile raw binary dumps directly without requiring IDA Pro:
 # Decompile entire firmware image to a C file (Big-Endian default)
 python -m lm32dec firmware.bin -o firmware.c
 
-# Decompile Little-Endian firmware (e.g. PS Vita LM32 coprocessor)
-python -m lm32dec 80010001_dec.bin --endian little -o coprocessor.c
+# Decompile Little-Endian firmware 
+python -m lm32dec sample.bin --endian little -o coprocessor.c
 
 # Decompile a specific function by address
 python -m lm32dec firmware.bin --func 0x00000300
