@@ -171,6 +171,7 @@ class Lm32DecPlugin(ida_idaapi.plugin_t):
         try:
             from lm32dec import view
             view.init_hooks()
+            view.check_and_restore_saved_view()
         except Exception:
             pass
         return ida_idaapi.PLUGIN_KEEP

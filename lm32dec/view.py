@@ -147,6 +147,22 @@ class _DecompilerView(ida_kernwin.simplecustviewer_t):
         self._last_token = None
         self._highlighted_token_lines = set()
 
+    def save_state(self, is_open=True):
+        """Save active window state into the persistent database netnode."""
+        if getattr(self, "_saving_state_lock", False):
+            return
+        self._saving_state_lock = True
+        try:
+            if self.current_func_ea is None:
+                return
+            pos = self.GetPos()
+            lineno = max(0, pos[0]) if (pos and pos[0] >= 0) else 0
+            col = max(0, pos[1]) if (pos and pos[1] >= 0) else 0
+            mode = "c"
+            db.save_window_state(is_open=is_open, func_ea=self.current_func_ea, lineno=lineno, col=col, mode=mode)
+        finally:
+            self._saving_state_lock = False
+
     def build_or_refresh(self, fn):
         """Populate or update lines with decompiled Function fn."""
         self.header_count = getattr(fn, "header_count", 0) or getattr(fn.lines, "header_count", 0)
@@ -408,6 +424,7 @@ class _DecompilerView(ida_kernwin.simplecustviewer_t):
         try:
             fn = ida_bridge.decompile_one(entry, show_casts=getattr(self, "show_casts", True))
             self.build_or_refresh(fn)
+            self.save_state(is_open=True)
             return True
         except Exception as exc:
             print("lm32dec: decompilation failed for 0x%X: %s" % (entry, exc))
@@ -1007,7 +1024,7 @@ class _DecompilerView(ida_kernwin.simplecustviewer_t):
             self.clear_asm_highlights()
             _active_viewer = None
             if self.current_func_ea is not None:
-                db.save_window_state(False, self.current_func_ea)
+                self.save_state(is_open=False)
             self.Close()
             return True
         # Navigation keys: Up(38), Down(40), PageUp(33), PageDown(34), Home(36), End(35)
@@ -1023,62 +1040,104 @@ class _UiHooks(ida_kernwin.UI_Hooks):
     def __init__(self, view):
         super().__init__()
         self.view = view
+        self._is_closing_database = False
 
-    def create_desktop_widget(self, title, cfg):
-        if title == _VIEW_TITLE:
-            global _active_viewer, _view_hooks
-            if _active_viewer is None or _active_viewer.GetWidget() is None:
-                v = _DecompilerView()
-                if v.Create(_VIEW_TITLE):
-                    _active_viewer = v
-                    _register_actions(_active_viewer)
-                    self.view = _active_viewer
-                    if _view_hooks is None:
-                        _view_hooks = _CustViewHooks(_active_viewer)
-                        _view_hooks.hook()
-                    else:
-                        _view_hooks.view = _active_viewer
-                    return _active_viewer.GetWidget()
-            else:
-                return _active_viewer.GetWidget()
+    def get_widget_config(self, widget, cfg):
+        """Called by IDA when saving desktop configuration."""
+        if self.view and widget == self.view.GetWidget():
+            pos = self.view.GetPos() or (0, 0)
+            return {
+                "ea": self.view.current_func_ea,
+                "lineno": pos[0],
+                "col": pos[1],
+                "mode": "c",
+                "sync": getattr(self.view, "sync_with_disasm", True),
+            }
         return None
 
-    def desktop_applied(self, name, from_idb, type):
-        self._restore_from_state()
+    def set_widget_config(self, widget, cfg):
+        """Called by IDA when restoring desktop configuration."""
+        if self.view and widget == self.view.GetWidget():
+            config = {}
+            if cfg and hasattr(cfg, "get_dict"):
+                try:
+                    config = cfg.get_dict() or {}
+                except Exception:
+                    pass
+            lineno = max(0, config.get("lineno", 0))
+            col = max(0, config.get("col", 0))
+            if lineno > 0:
+                try:
+                    self.view.Jump(lineno, col)
+                except Exception:
+                    pass
 
-    def database_inited(self, is_new_database):
-        self._restore_from_state()
+    def create_desktop_widget(self, title, cfg):
+        """Called by IDA desktop manager to reconstruct docked widgets."""
+        if title != _VIEW_TITLE:
+            return None
+        config = {}
+        if cfg and hasattr(cfg, "get_dict"):
+            try:
+                config = cfg.get_dict() or {}
+            except Exception:
+                pass
+        ea = config.get("ea")
+        if ea is None:
+            st = db.load_window_state()
+            if st.get("is_open"):
+                ea = st.get("func_ea")
+                config.update(st)
+        if ea is None:
+            return None
+
+        v = restore_view(ea, config=config, display=False)
+        return v.GetWidget() if v else None
+
+    def ready_to_run(self):
+        """Called when IDA UI elements are fully initialized on database reopen."""
+        check_and_restore_saved_view()
+
+    def desktop_applied(self, name, from_idb, type):
+        """Called when a desktop layout is applied."""
+        check_and_restore_saved_view()
+
+    def database_inited(self, is_new_database, idc_script=None):
+        """Called after database initialization."""
+        check_and_restore_saved_view()
 
     def saving(self):
-        self._record_current_state()
+        if getattr(self, "_in_saving", False):
+            return
+        self._in_saving = True
+        try:
+            self._is_closing_database = True
+            self._record_current_state()
+        finally:
+            self._in_saving = False
 
     def saved(self):
-        self._record_current_state()
+        if getattr(self, "_in_saved", False):
+            return
+        self._in_saved = True
+        try:
+            self._record_current_state()
+        finally:
+            self._is_closing_database = False
+            self._in_saved = False
+
+    def database_closed(self):
+        global _active_viewer
+        _active_viewer = None
+        self._is_closing_database = False
 
     def _record_current_state(self):
         global _active_viewer
         if _active_viewer is not None and _active_viewer.GetWidget() is not None:
-            pos = _active_viewer.GetPos() or (0, 0)
-            if _active_viewer.current_func_ea is not None:
-                db.save_window_state(True, _active_viewer.current_func_ea,
-                                     lineno=pos[0], col=pos[1])
-
-    def _restore_from_state(self):
-        global _active_viewer
-        state = db.load_window_state()
-        if not state.get("is_open") or not state.get("func_ea"):
-            return
-        func_ea = state["func_ea"]
-        lineno = state.get("lineno", 0)
-        col = state.get("col", 0)
-        if _active_viewer is not None and _active_viewer.GetWidget() is not None:
-            if _active_viewer.current_func_ea != func_ea or not _active_viewer.raw_lines:
-                _active_viewer.show_func(func_ea)
-            if lineno:
-                try:
-                    _active_viewer.Jump(lineno, col)
-                except Exception:
-                    pass
+            try:
+                _active_viewer.save_state(is_open=True)
+            except Exception:
+                pass
 
     def screen_ea_changed(self, ea, prev_ea):
         """Automatically follow current function in disassembly and sync line selection."""
@@ -1096,14 +1155,19 @@ class _UiHooks(ida_kernwin.UI_Hooks):
                 return
         self.view.sync_from_disasm_ea(ea)
 
-    def widget_invisible(self, widget):
-        """Reset active viewer when the decompiler window is closed."""
+    def widget_closing(self, widget):
+        """Called when a widget is closing."""
+        global _active_viewer
         if self.view and widget == self.view.GetWidget():
-            global _active_viewer
             self.view.clear_asm_highlights()
-            if self.view.current_func_ea is not None:
-                db.save_window_state(False, self.view.current_func_ea)
+            if not self._is_closing_database and self.view.current_func_ea is not None:
+                self.view.save_state(is_open=False)
             _active_viewer = None
+
+    def widget_invisible(self, widget):
+        """Called when widget becomes invisible (e.g. switching tabs). DO NOT mark is_open=False!"""
+        if self.view and widget == self.view.GetWidget():
+            self.view.clear_asm_highlights()
 
     def finish_populating_widget_popup(self, widget, popup_handle):
         """Attach decompiler context actions to the right-click popup menu."""
@@ -1217,52 +1281,146 @@ def _register_actions(view):
         ida_kernwin.register_action(desc)
 
 
-def show(function):
+def show(function, dock=True):
     """Open or refresh the dockable decompiler view for the specified function."""
     global _active_viewer, _ui_hooks, _view_hooks
-    first_create = False
     if _active_viewer is None or _active_viewer.GetWidget() is None:
         v = _DecompilerView()
         if not v.Create(_VIEW_TITLE):
             return None
         _active_viewer = v
         _register_actions(_active_viewer)
-        first_create = True
 
-        if _ui_hooks is None:
+        if _ui_hooks is None and ida_kernwin:
             _ui_hooks = _UiHooks(_active_viewer)
             _ui_hooks.hook()
-        else:
+        elif _ui_hooks is not None:
             _ui_hooks.view = _active_viewer
 
-        if _view_hooks is None:
+        if _view_hooks is None and ida_kernwin:
             _view_hooks = _CustViewHooks(_active_viewer)
             _view_hooks.hook()
-        else:
+        elif _view_hooks is not None:
+            _view_hooks.view = _active_viewer
+    else:
+        if _ui_hooks is not None:
+            _ui_hooks.view = _active_viewer
+        if _view_hooks is not None:
             _view_hooks.view = _active_viewer
 
-    _active_viewer.build_or_refresh(function)
+    if isinstance(function, int):
+        _active_viewer.show_func(function)
+    else:
+        _active_viewer.build_or_refresh(function)
     _active_viewer.Show()
 
-    if first_create:
+    # Dock beside IDA View-A if in GUI mode
+    if dock and ida_kernwin and hasattr(ida_kernwin, "is_idaq") and ida_kernwin.is_idaq():
         try:
-            ida_kernwin.set_dock_pos(_VIEW_TITLE, "IDA View-A", ida_kernwin.DP_RIGHT)
+            disasm_w = ida_kernwin.find_widget("IDA View-A")
+            my_w = _active_viewer.GetWidget()
+            if disasm_w and my_w:
+                ida_kernwin.display_widget(
+                    my_w,
+                    ida_kernwin.WOPN_DP_TAB | ida_kernwin.WOPN_RESTORE,
+                    disasm_w
+                )
         except Exception:
             pass
 
-    if _active_viewer.current_func_ea is not None:
-        pos = _active_viewer.GetPos() or (0, 0)
-        db.save_window_state(True, _active_viewer.current_func_ea, lineno=pos[0], col=pos[1])
-
+    _active_viewer.save_state(is_open=True)
     return _active_viewer
+
+
+def restore_view(ea, config=None, display=True):
+    """Restore decompiler view for function at ea with persistent settings."""
+    global _active_viewer, _ui_hooks, _view_hooks
+    try:
+        pfn = ida_funcs.get_func(ea)
+        entry = pfn.start_ea if pfn else ea
+        fn = ida_bridge.decompile_one(entry)
+    except Exception as exc:
+        print("lm32dec: restore failed for 0x%X: %s" % (ea, exc))
+        return None
+
+    if _active_viewer is None or _active_viewer.GetWidget() is None:
+        v = _DecompilerView()
+        if not v.Create(_VIEW_TITLE):
+            return None
+        _active_viewer = v
+        _register_actions(_active_viewer)
+
+        if _ui_hooks is None and ida_kernwin:
+            _ui_hooks = _UiHooks(_active_viewer)
+            _ui_hooks.hook()
+        elif _ui_hooks is not None:
+            _ui_hooks.view = _active_viewer
+
+        if _view_hooks is None and ida_kernwin:
+            _view_hooks = _CustViewHooks(_active_viewer)
+            _view_hooks.hook()
+        elif _view_hooks is not None:
+            _view_hooks.view = _active_viewer
+    else:
+        v = _active_viewer
+        if _ui_hooks is not None:
+            _ui_hooks.view = v
+        if _view_hooks is not None:
+            _view_hooks.view = v
+
+    cfg = config or {}
+    v.sync_with_disasm = cfg.get("sync", db.get_sync_enabled())
+    v.build_or_refresh(fn)
+
+    lineno = max(0, cfg.get("lineno", 0))
+    col = max(0, cfg.get("col", 0))
+    if lineno > 0:
+        try:
+            v.Jump(lineno, col)
+        except Exception:
+            pass
+
+    if display:
+        v.Show()
+        if ida_kernwin and hasattr(ida_kernwin, "is_idaq") and ida_kernwin.is_idaq():
+            try:
+                disasm_w = ida_kernwin.find_widget("IDA View-A")
+                my_w = v.GetWidget()
+                if disasm_w and my_w:
+                    ida_kernwin.display_widget(
+                        my_w,
+                        ida_kernwin.WOPN_DP_TAB | ida_kernwin.WOPN_RESTORE,
+                        disasm_w
+                    )
+            except Exception:
+                pass
+
+    v.save_state(is_open=True)
+    return v
+
+
+def check_and_restore_saved_view():
+    """Restore decompiler view from database netnode if it was open when saved."""
+    if not ida_kernwin or (hasattr(ida_kernwin, "is_idaq") and not ida_kernwin.is_idaq()):
+        return None
+    existing = ida_kernwin.find_widget(_VIEW_TITLE)
+    if existing is not None:
+        return None
+    st = db.load_window_state()
+    if st and st.get("is_open") and st.get("func_ea") is not None:
+        return restore_view(st["func_ea"], config=st, display=True)
+    return None
 
 
 def init_hooks():
     """Initialize UI hooks early (at plugin load) to support desktop/docking persistence."""
-    global _ui_hooks
-    if _ui_hooks is None:
+    global _ui_hooks, _view_hooks
+    if _ui_hooks is None and ida_kernwin:
         _ui_hooks = _UiHooks(None)
         _ui_hooks.hook()
+    if _view_hooks is None and ida_kernwin:
+        _view_hooks = _CustViewHooks(None)
+        _view_hooks.hook()
 
 
 def show_listing(title, lines):

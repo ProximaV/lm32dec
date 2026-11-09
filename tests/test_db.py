@@ -72,6 +72,14 @@ def test_db_locators_and_window_state():
     assert inv is False
     assert db.is_iflag_inverted(func_ea, 0x800320) is False
 
+    # Compound Locators
+    db.set_var_locator(func_ea, "reg:3@0x800314", name="pkt_size", type_str="uint32_t", flags=1)
+    loc = db.get_var_locator(func_ea, "reg:3@0x800314")
+    assert loc is not None
+    assert loc["name"] == "pkt_size"
+    assert loc["type"] == "uint32_t"
+    assert loc["flags"] == 1
+
     # Window state
     db.save_window_state(True, func_ea, lineno=10, col=2)
     ws = db.load_window_state()

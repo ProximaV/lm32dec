@@ -36,18 +36,44 @@ def _get_node():
         return None
 
 
+def mark_dirty():
+    """Notify IDA that the database has unsaved modifications."""
+    try:
+        import ida_ida
+        ida_ida.inf_inc_database_change_count(1)
+    except Exception:
+        pass
+
+
 def get_func_data(func_ea):
-    """Retrieve persistent renames, types, and prototype for a function."""
+    """Retrieve persistent renames, types, locators, comments, and prototype for a function."""
     node = _get_node()
+    default_data = {
+        "renames": {},
+        "types": {},
+        "proto": None,
+        "lvars": {},
+        "cmts": {},
+        "numforms": {},
+        "iflags": []
+    }
     if node is None:
-        return _MEM_STORAGE.get(func_ea, {"renames": {}, "types": {}, "proto": None})
+        data = _MEM_STORAGE.get(func_ea)
+        if not data:
+            return default_data
+        for k, v in default_data.items():
+            data.setdefault(k, v)
+        return data
     try:
         val = node.supstr(func_ea)
         if val:
-            return json.loads(val)
+            data = json.loads(val)
+            for k, v in default_data.items():
+                data.setdefault(k, v)
+            return data
     except Exception:
         pass
-    return {"renames": {}, "types": {}, "proto": None}
+    return default_data
 
 
 def set_func_data(func_ea, data):
@@ -60,6 +86,7 @@ def set_func_data(func_ea, data):
         node.supset(func_ea, json.dumps(data))
     except Exception:
         _MEM_STORAGE[func_ea] = data
+    mark_dirty()
 
 
 def set_var_rename(func_ea, old_name, new_name):
@@ -135,6 +162,7 @@ def set_sync_enabled(enabled):
             node.altset(0, 1 if enabled else 2)
         except Exception:
             pass
+    mark_dirty()
 
 
 def clear_func_data(func_ea):
@@ -147,6 +175,7 @@ def clear_func_data(func_ea):
         node.supdel(func_ea)
     except Exception:
         pass
+    mark_dirty()
 
 
 def set_statement_cmt(func_ea, stmt_ea, cmt_str):
@@ -209,13 +238,40 @@ def is_iflag_inverted(func_ea, branch_ea):
     return ea_val in data.get("iflags", [])
 
 
+def set_var_locator(func_ea, locator, name=None, type_str=None, flags=0):
+    """Save user modifications keyed by robust definition-site locator.
+    
+    Locator example: 'reg:3@0x2548' or 'stk:-0x20@0x2550'.
+    """
+    data = get_func_data(func_ea)
+    lvars = data.setdefault("lvars", {})
+    if not name and not type_str and not flags:
+        lvars.pop(locator, None)
+    else:
+        entry = lvars.setdefault(locator, {})
+        if name is not None:
+            entry["name"] = name
+        if type_str is not None:
+            entry["type"] = type_str.strip()
+        if flags:
+            entry["flags"] = flags
+    set_func_data(func_ea, data)
+
+
+def get_var_locator(func_ea, locator):
+    """Retrieve saved info for a locator."""
+    data = get_func_data(func_ea)
+    return data.get("lvars", {}).get(locator)
+
+
 WIN_STATE_KEY = 0x7FFFFFFF
-_MEM_WIN_STATE = {}
+_WINDOW_STATE = {"is_open": False, "func_ea": None, "lineno": 0, "col": 0, "mode": "c"}
 
 
-def save_window_state(is_open, func_ea, lineno=0, col=0, mode="c"):
-    """Persist decompiler window state (open status, function, caret, mode) to netnode."""
-    state = {
+def save_window_state(is_open, func_ea=None, lineno=0, col=0, mode="c"):
+    """Persist open/closed status, current function EA, cursor, and view mode."""
+    global _WINDOW_STATE
+    _WINDOW_STATE = {
         "is_open": bool(is_open),
         "func_ea": func_ea,
         "lineno": lineno,
@@ -225,21 +281,33 @@ def save_window_state(is_open, func_ea, lineno=0, col=0, mode="c"):
     node = _get_node()
     if node is not None:
         try:
-            node.setblob(json.dumps(state).encode("utf-8"), WIN_STATE_KEY, "S")
+            node.supset(WIN_STATE_KEY, json.dumps(_WINDOW_STATE))
         except Exception:
             pass
-    _MEM_WIN_STATE.clear()
-    _MEM_WIN_STATE.update(state)
 
 
 def load_window_state():
-    """Retrieve saved decompiler window state from netnode."""
+    """Retrieve window state dictionary."""
     node = _get_node()
     if node is not None:
         try:
-            raw = node.getblob(WIN_STATE_KEY, "S")
-            if raw:
-                return json.loads(raw.decode("utf-8"))
+            val = node.supstr(WIN_STATE_KEY)
+            if val:
+                return json.loads(val)
         except Exception:
             pass
-    return dict(_MEM_WIN_STATE)
+    return dict(_WINDOW_STATE)
+
+
+def clear_all():
+    """Clear in-memory and database storage (useful in tests)."""
+    global _MEM_STORAGE, _MEM_SYNC, _WINDOW_STATE
+    _MEM_STORAGE.clear()
+    _MEM_SYNC = True
+    _WINDOW_STATE = {"is_open": False, "func_ea": None, "lineno": 0, "col": 0, "mode": "c"}
+    node = _get_node()
+    if node is not None:
+        try:
+            node.kill()
+        except Exception:
+            pass

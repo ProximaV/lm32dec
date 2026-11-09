@@ -258,7 +258,7 @@ class _Emit:
         # 4. Check if address is a typed pointer variable (*ptr)
         if isinstance(e.addr, (ir.Reg, ir.Var)):
             vname = e.addr.name
-            vtype = self.user_types.get(vname, "")
+            vtype = self.user_types.get(vname) or self.user_types.get(self.user_renames.get(vname, ""), "")
             if vtype.endswith("*"):
                 base_t = vtype[:-1].strip()
                 t_size = 4 if base_t in ("int", "_DWORD", "uint32_t", "int32_t", "unsigned int") else (
@@ -273,7 +273,7 @@ class _Emit:
             if isinstance(e.addr.l, (ir.Reg, ir.Var)) and isinstance(e.addr.r, (ir.Const, int)):
                 vname = e.addr.l.name
                 offset_val = e.addr.r.value if isinstance(e.addr.r, ir.Const) else e.addr.r
-                vtype = self.user_types.get(vname, "")
+                vtype = self.user_types.get(vname) or self.user_types.get(self.user_renames.get(vname, ""), "")
                 if vtype.endswith("*"):
                     base_t = vtype[:-1].strip()
                     t_size = 4 if base_t in ("int", "_DWORD", "uint32_t", "int32_t", "unsigned int") else (
