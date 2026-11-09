@@ -1,0 +1,245 @@
+"""
+Database-backed persistence layer for lm32dec using IDA netnodes.
+
+Stores and retrieves per-function:
+- Variable renames (old_name -> new_name)
+- Variable type overrides (var_name -> type_str)
+- Function prototype overrides (prototype string)
+- Global UI preferences (sync with disassembly enabled)
+- Definition-site variable locators
+- Statement comments and number formats
+- Window state persistence
+
+When run outside IDA (headless tests), falls back to an in-memory dictionary.
+"""
+
+import json
+
+try:
+    import ida_netnode
+except ImportError:
+    ida_netnode = None
+
+NODE_NAME = "$ lm32dec"
+_MEM_STORAGE = {}
+_MEM_SYNC = True
+
+
+def _get_node():
+    if ida_netnode is None:
+        return None
+    try:
+        node = ida_netnode.netnode()
+        node.create(NODE_NAME)
+        return node
+    except Exception:
+        return None
+
+
+def get_func_data(func_ea):
+    """Retrieve persistent renames, types, and prototype for a function."""
+    node = _get_node()
+    if node is None:
+        return _MEM_STORAGE.get(func_ea, {"renames": {}, "types": {}, "proto": None})
+    try:
+        val = node.supstr(func_ea)
+        if val:
+            return json.loads(val)
+    except Exception:
+        pass
+    return {"renames": {}, "types": {}, "proto": None}
+
+
+def set_func_data(func_ea, data):
+    """Save persistent renames, types, and prototype for a function."""
+    node = _get_node()
+    if node is None:
+        _MEM_STORAGE[func_ea] = data
+        return
+    try:
+        node.supset(func_ea, json.dumps(data))
+    except Exception:
+        _MEM_STORAGE[func_ea] = data
+
+
+def set_var_rename(func_ea, old_name, new_name):
+    """Save a variable rename (e.g. v0 -> counter, or counter -> new_counter).
+    
+    If new_name is empty or None, the rename is cleared, reverting to default.
+    """
+    data = get_func_data(func_ea)
+    renames = data.setdefault("renames", {})
+
+    # If old_name was previously mapped from a canonical name, update that mapping
+    canonical = None
+    for k, v in renames.items():
+        if v == old_name:
+            canonical = k
+            break
+    key = canonical if canonical is not None else old_name
+
+    if not new_name or new_name == key:
+        renames.pop(key, None)
+    else:
+        renames[key] = new_name
+    set_func_data(func_ea, data)
+
+
+def set_var_type(func_ea, var_name, type_str):
+    """Save a variable type override (e.g. v0 -> uint32_t *).
+    
+    If type_str is empty or None, the override is cleared.
+    """
+    data = get_func_data(func_ea)
+    types = data.setdefault("types", {})
+    if not type_str:
+        types.pop(var_name, None)
+    else:
+        types[var_name] = type_str.strip()
+    set_func_data(func_ea, data)
+
+
+def set_func_proto(func_ea, proto_str):
+    """Save a function prototype override (e.g. int sub_800D7A(int a0, int a1)).
+    
+    If proto_str is empty or None, the override is cleared.
+    """
+    data = get_func_data(func_ea)
+    if not proto_str:
+        data["proto"] = None
+    else:
+        data["proto"] = proto_str.strip()
+    set_func_data(func_ea, data)
+
+
+def get_sync_enabled():
+    """Check if 'Sync with Disassembly' is enabled (defaults to True)."""
+    global _MEM_SYNC
+    node = _get_node()
+    if node is None:
+        return _MEM_SYNC
+    try:
+        val = node.altval(0)
+        return val != 2  # 2 means explicitly disabled; 0 or 1 means enabled
+    except Exception:
+        return _MEM_SYNC
+
+
+def set_sync_enabled(enabled):
+    """Persist the 'Sync with Disassembly' preference."""
+    global _MEM_SYNC
+    _MEM_SYNC = bool(enabled)
+    node = _get_node()
+    if node is not None:
+        try:
+            node.altset(0, 1 if enabled else 2)
+        except Exception:
+            pass
+
+
+def clear_func_data(func_ea):
+    """Clear all persistent customizations for a function."""
+    node = _get_node()
+    if node is None:
+        _MEM_STORAGE.pop(func_ea, None)
+        return
+    try:
+        node.supdel(func_ea)
+    except Exception:
+        pass
+
+
+def set_statement_cmt(func_ea, stmt_ea, cmt_str):
+    """Save a statement comment attached to instruction linear address."""
+    data = get_func_data(func_ea)
+    cmts = data.setdefault("cmts", {})
+    ea_key = hex(stmt_ea) if isinstance(stmt_ea, int) else str(stmt_ea)
+    if not cmt_str:
+        cmts.pop(ea_key, None)
+    else:
+        cmts[ea_key] = cmt_str.strip()
+    set_func_data(func_ea, data)
+
+
+def get_statement_cmt(func_ea, stmt_ea):
+    """Retrieve saved comment for a statement."""
+    data = get_func_data(func_ea)
+    ea_key = hex(stmt_ea) if isinstance(stmt_ea, int) else str(stmt_ea)
+    return data.get("cmts", {}).get(ea_key)
+
+
+def set_numform(func_ea, stmt_ea, op_idx, form_str):
+    """Save immediate constant display format ('hex', 'dec', 'char')."""
+    data = get_func_data(func_ea)
+    numforms = data.setdefault("numforms", {})
+    key = f"{hex(stmt_ea) if isinstance(stmt_ea, int) else str(stmt_ea)}:{op_idx}"
+    if not form_str or form_str == "default":
+        numforms.pop(key, None)
+    else:
+        numforms[key] = form_str.lower()
+    set_func_data(func_ea, data)
+
+
+def get_numform(func_ea, stmt_ea, op_idx=0):
+    """Retrieve saved format for an immediate constant."""
+    data = get_func_data(func_ea)
+    key = f"{hex(stmt_ea) if isinstance(stmt_ea, int) else str(stmt_ea)}:{op_idx}"
+    return data.get("numforms", {}).get(key)
+
+
+def toggle_iflag(func_ea, branch_ea):
+    """Toggle inverted condition flag for an if statement."""
+    data = get_func_data(func_ea)
+    iflags = data.setdefault("iflags", [])
+    ea_val = branch_ea if isinstance(branch_ea, int) else int(branch_ea, 16)
+    if ea_val in iflags:
+        iflags.remove(ea_val)
+        inverted = False
+    else:
+        iflags.append(ea_val)
+        inverted = True
+    set_func_data(func_ea, data)
+    return inverted
+
+
+def is_iflag_inverted(func_ea, branch_ea):
+    """Check if if-condition at branch_ea is marked inverted."""
+    data = get_func_data(func_ea)
+    ea_val = branch_ea if isinstance(branch_ea, int) else int(branch_ea, 16)
+    return ea_val in data.get("iflags", [])
+
+
+WIN_STATE_KEY = 0x7FFFFFFF
+_MEM_WIN_STATE = {}
+
+
+def save_window_state(is_open, func_ea, lineno=0, col=0, mode="c"):
+    """Persist decompiler window state (open status, function, caret, mode) to netnode."""
+    state = {
+        "is_open": bool(is_open),
+        "func_ea": func_ea,
+        "lineno": lineno,
+        "col": col,
+        "mode": mode,
+    }
+    node = _get_node()
+    if node is not None:
+        try:
+            node.setblob(json.dumps(state).encode("utf-8"), WIN_STATE_KEY, "S")
+        except Exception:
+            pass
+    _MEM_WIN_STATE.clear()
+    _MEM_WIN_STATE.update(state)
+
+
+def load_window_state():
+    """Retrieve saved decompiler window state from netnode."""
+    node = _get_node()
+    if node is not None:
+        try:
+            raw = node.getblob(WIN_STATE_KEY, "S")
+            if raw:
+                return json.loads(raw.decode("utf-8"))
+        except Exception:
+            pass
+    return dict(_MEM_WIN_STATE)
