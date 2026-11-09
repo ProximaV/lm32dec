@@ -23,8 +23,6 @@ import idaapi
 
 from . import highlight, ida_bridge, db
 
-_EA = re.compile(r"\b(?:loc_|sub_)([0-9A-Fa-f]+)\b")
-_ADDR_HEX = re.compile(r"\b0x([0-9A-Fa-f]{5,8})\b")
 _VIEW_TITLE = "lm32dec - Pseudocode"
 
 ACTION_DECOMPILE = "lm32dec:decompile"
@@ -79,24 +77,6 @@ def _get_highlight_colors():
         return 0x304855, 0x283848
     else:
         return 0xC0E0FF, 0xD0E8FF
-
-
-def _line_ea(line):
-    """Extract code linear address from loc_XXXXX, sub_XXXXX, or 0xXXXXX in line."""
-    clean = ida_lines.tag_remove(line) if hasattr(ida_lines, "tag_remove") else line
-    m = _EA.search(clean)
-    if m:
-        try:
-            return int(m.group(1), 16)
-        except ValueError:
-            pass
-    m = _ADDR_HEX.search(clean)
-    if m:
-        try:
-            return int(m.group(1), 16)
-        except ValueError:
-            pass
-    return None
 
 
 def _jumpto_disasm(ea):
@@ -182,7 +162,7 @@ class _DecompilerView(ida_kernwin.simplecustviewer_t):
         for i, ln in enumerate(fn.lines):
             self.AddLine(highlight.colorize(ln))
             ea = fn_line_eas[i] if (fn_line_eas and i < len(fn_line_eas)) else None
-            self.line_ea.append(ea if ea is not None else _line_ea(ln))
+            self.line_ea.append(ea)
         self.Refresh()
 
         # If IDA's screen cursor is already at a specific executable body statement,
@@ -632,13 +612,11 @@ class _DecompilerView(ida_kernwin.simplecustviewer_t):
                     target_ea = None
             except Exception:
                 pass
-            if target_ea is None:
-                m = _EA.search(word) or _ADDR_HEX.search(word)
-                if m:
-                    try:
-                        target_ea = int(m.group(1), 16)
-                    except ValueError:
-                        pass
+            if target_ea is None and word.startswith(("0x", "0X")):
+                try:
+                    target_ea = int(word, 16)
+                except ValueError:
+                    pass
         if target_ea is None:
             stmt_eas = self.line_to_eas.get(lineno, [])
             target_ea = stmt_eas[0] if stmt_eas else self.current_func_ea
@@ -917,26 +895,10 @@ class _DecompilerView(ida_kernwin.simplecustviewer_t):
             except Exception:
                 pass
 
-            # 2. Check if word is sub_XXXXXX or loc_XXXXXX
-            m = _EA.search(word)
-            if m:
+            # 2. Check if word is a hex address literal (e.g. 0x10040)
+            if word.startswith(("0x", "0X")):
                 try:
-                    target_ea = int(m.group(1), 16)
-                    pfn = ida_funcs.get_func(target_ea)
-                    _jumpto_disasm(target_ea)
-                    if pfn and pfn.start_ea == target_ea and target_ea != self.current_func_ea:
-                        pos = self.GetPos()
-                        self._nav_history.append((self.current_func_ea, pos[0] if pos else 0, pos[1] if pos else 0))
-                        self.show_func(target_ea)
-                    return True
-                except ValueError:
-                    pass
-
-            # 3. Check hex address
-            m = _ADDR_HEX.search(word)
-            if m:
-                try:
-                    target_ea = int(m.group(1), 16)
+                    target_ea = int(word, 16)
                     _jumpto_disasm(target_ea)
                     return True
                 except ValueError:

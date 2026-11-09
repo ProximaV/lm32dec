@@ -223,7 +223,26 @@ def analyze_calling_convention(func, frame_info=None, user_proto=None, func_name
 
 
 def parse_cdecl_prototype(proto_str):
-    """Parse a simple C prototype string like 'int foo(int a, void *b)'."""
+    """Parse a C prototype string like 'int foo(int a, void *b)', using IDA's parse_decl when available."""
+    try:
+        import ida_typeinf
+        tif = ida_typeinf.tinfo_t()
+        decl = proto_str.strip().rstrip(";") + ";"
+        fn_name = ida_typeinf.parse_decl(tif, None, decl, ida_typeinf.PT_SIL)
+        if fn_name and tif.is_func():
+            fi = ida_typeinf.func_type_data_t()
+            if tif.get_func_details(fi):
+                ret_type = fi.rettype.dstr()
+                params = []
+                for idx, p in enumerate(fi):
+                    p_name = p.name or f"a{idx}"
+                    t_str = p.type.dstr()
+                    loc = ARG_REGS[idx] if idx < len(ARG_REGS) else f"stack_{idx}"
+                    params.append(Param(p_name, t_str, location=loc))
+                return FunctionSig(name=fn_name, ret_type=ret_type, params=params)
+    except Exception:
+        pass
+
     import re
     proto_str = proto_str.strip().rstrip(";")
     m = re.match(r"^([\w\s\*]+?)\s+(\w+)\s*\((.*?)\)$", proto_str)

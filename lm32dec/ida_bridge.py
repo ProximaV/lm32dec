@@ -162,7 +162,7 @@ def _entries():
 
 
 def _resolve_op_name(ea, n, op=None):
-    """Resolve an instruction operand to a named symbol in IDA using structured instruction decoding."""
+    """Resolve an instruction operand to a named symbol in IDA using structured instruction decoding and flags."""
     try:
         import ida_ua, ida_name, ida_bytes, idautils
         insn = ida_ua.insn_t()
@@ -172,32 +172,44 @@ def _resolve_op_name(ea, n, op=None):
                 # 1. Direct memory or code target
                 if ida_op.type in (ida_ua.o_mem, ida_ua.o_near):
                     target_ea = ida_op.addr
-                    name = ida_name.get_name(target_ea)
-                    if name and not name.startswith(("unk_", "byte_", "word_", "dword_", "loc_", "sub_")):
-                        return name
+                    sym = ida_name.get_ea_name(target_ea, ida_name.GN_NOT_DUMMY)
+                    if sym:
+                        return sym
+                    tflags = ida_bytes.get_flags(target_ea)
+                    if ida_bytes.has_user_name(tflags):
+                        return ida_name.get_name(target_ea)
                 # 2. Immediate operand marked as offset or referencing mapped address
                 elif ida_op.type == ida_ua.o_imm:
                     flags = ida_bytes.get_flags(ea)
                     val = ida_op.value & 0xFFFFFFFF
                     if ida_bytes.is_off(flags, n) or (0x1000 <= val < 0xFFFFFFFF):
-                        name = ida_name.get_name(val)
-                        if name and not name.startswith(("unk_", "byte_", "word_", "dword_", "loc_", "sub_")):
-                            return name
+                        sym = ida_name.get_ea_name(val, ida_name.GN_NOT_DUMMY)
+                        if sym:
+                            return sym
+                        vflags = ida_bytes.get_flags(val)
+                        if ida_bytes.has_user_name(vflags):
+                            return ida_name.get_name(val)
 
         # 3. Data cross references from this instruction
         for x in idautils.XrefsFrom(ea):
             if not x.iscode:
-                xname = ida_name.get_name(x.to)
-                if xname and not xname.startswith(("unk_", "byte_", "word_", "dword_", "loc_", "sub_")):
-                    return xname
+                sym = ida_name.get_ea_name(x.to, ida_name.GN_NOT_DUMMY)
+                if sym:
+                    return sym
+                xflags = ida_bytes.get_flags(x.to)
+                if ida_bytes.has_user_name(xflags):
+                    return ida_name.get_name(x.to)
 
         # 4. Fallback to decoder op value if provided
         if op is not None:
             val = getattr(op, "value", None) or getattr(op, "addr", None)
             if val is not None and isinstance(val, int) and (val >= 0x1000):
-                val_name = ida_name.get_name(val)
-                if val_name and not val_name.startswith(("unk_", "byte_", "word_", "dword_", "loc_", "sub_")):
-                    return val_name
+                sym = ida_name.get_ea_name(val, ida_name.GN_NOT_DUMMY)
+                if sym:
+                    return sym
+                val_flags = ida_bytes.get_flags(val)
+                if ida_bytes.has_user_name(val_flags):
+                    return ida_name.get_name(val)
     except Exception:
         pass
     return None
@@ -280,8 +292,69 @@ def _get_ida_func_proto(ea):
     return None
 
 
+def decode_insn_via_ida(ea):
+    """Decode a single instruction at ea using IDA's native instruction decoding API (ida_ua.decode_insn)."""
+    try:
+        import ida_ua
+        insn = ida_ua.insn_t()
+        if ida_ua.decode_insn(insn, ea) <= 0:
+            return None
+        res = decoder.Insn(ea)
+        res.size = insn.size
+        res.mnem = insn.get_canon_mnem().lower()
+        if res.mnem == "mvu":
+            res.mnem = "mvui"
+        for n in range(6):
+            op = insn.ops[n]
+            if op.type == ida_ua.o_void:
+                break
+            if op.type == ida_ua.o_reg:
+                res.ops.append(decoder.Operand("reg", reg=op.reg))
+            elif op.type == ida_ua.o_imm:
+                res.ops.append(decoder.Operand("imm", value=op.value & 0xFFFFFFFF))
+            elif op.type == ida_ua.o_near:
+                res.ops.append(decoder.Operand("near", addr=op.addr & 0xFFFFFFFF))
+            elif op.type == ida_ua.o_displ:
+                disp = op.addr
+                if disp >= (1 << 31):
+                    disp -= (1 << 64) if disp >= (1 << 63) else (1 << 32)
+                w = ida_ua.get_dtype_size(op.dtype) or 4
+                mode = "phrase" if disp == 0 else "displ"
+                res.ops.append(decoder.Operand(mode, base_reg=op.reg, disp=disp, width=w))
+            elif op.type == ida_ua.o_phrase:
+                w = ida_ua.get_dtype_size(op.dtype) or 4
+                res.ops.append(decoder.Operand("phrase", base_reg=op.reg, disp=0, width=w))
+            elif op.type == ida_ua.o_mem:
+                res.ops.append(decoder.Operand("near", addr=op.addr & 0xFFFFFFFF))
+        return res
+    except Exception:
+        return None
+
+
+def decode_func_via_ida(pfn):
+    """Decode all instructions in an IDA function pfn using the native IDA API."""
+    try:
+        import ida_ua, ida_idp, ida_funcs
+        insns = {}
+        calls = set()
+        insn_t = ida_ua.insn_t()
+        for item_ea in ida_funcs.Addresses(pfn):
+            ins = decode_insn_via_ida(item_ea)
+            if ins is not None:
+                insns[item_ea] = ins
+                if ida_ua.decode_insn(insn_t, item_ea) > 0:
+                    feat = insn_t.get_canon_feature()
+                    if feat & ida_idp.CF_CALL:
+                        tgt = decoder.target_of(ins)
+                        if tgt is not None:
+                            calls.add(tgt)
+        return insns, calls
+    except Exception:
+        return None, None
+
+
 def _get_caller_consensus(entry):
-    """Infer whether callers set parameter registers (r1..r8) before calling entry."""
+    """Infer whether callers set parameter registers (r1..r8) before calling entry using native instruction flags."""
     try:
         import idautils, ida_ua, ida_idp, ida_bytes, ida_idaapi
         caller_eas = list(idautils.CodeRefsTo(entry, 0))
@@ -300,20 +373,16 @@ def _get_caller_consensus(entry):
                     break
                 if ida_ua.decode_insn(insn, cur) == 0:
                     break
-                mnem = insn.get_canon_mnem().lower()
                 count += 1
-                if mnem in ("b", "bi", "eret", "bret") and cur != c:
+                feat = insn.get_canon_feature()
+                if (feat & ida_idp.CF_STOP) and cur != c:
                     break
-                # Check destination operand if it writes to r1..r8
-                if len(insn.ops) > 0 and insn.ops[0].type == ida_ua.o_reg:
-                    rname = ida_idp.get_reg_name(insn.ops[0].reg, insn.ops[0].dtype).lower().lstrip("$r")
-                    try:
-                        regnum = int(rname)
-                        if 1 <= regnum <= 8 and regnum not in found:
-                            found.add(regnum)
-                    except ValueError:
-                        pass
-                if mnem in ("call", "calli"):
+                # Check destination operand if it modifies r1..r8
+                if (feat & ida_idp.CF_CHG1) and len(insn.ops) > 0 and insn.ops[0].type == ida_ua.o_reg:
+                    reg_idx = insn.ops[0].reg
+                    if 1 <= reg_idx <= 8 and reg_idx not in found:
+                        found.add(reg_idx)
+                if (feat & ida_idp.CF_CALL):
                     break
             valid += 1
             for regnum in found:
@@ -334,7 +403,7 @@ def _find_entry(image, base, ea, entset, is_be=True):
     if ea in entset:
         return ea
     try:
-        import ida_bytes, ida_ua, ida_idaapi
+        import ida_bytes, ida_ua, ida_idp, ida_idaapi
         cur = ea
         insn = ida_ua.insn_t()
         limit = max(base, cur - 0x400)
@@ -345,15 +414,14 @@ def _find_entry(image, base, ea, entset, is_be=True):
             if prev in entset:
                 return prev
             if ida_ua.decode_insn(insn, prev) > 0:
-                mnem = insn.get_canon_mnem().lower()
-                # Unconditional returns/jumps in LM32
-                if mnem in ("eret", "bret", "bi") or (mnem == "b" and insn.ops[0].type == ida_ua.o_reg and insn.ops[0].reg == 29):
+                feat = insn.get_canon_feature()
+                # Unconditional returns/stops in LM32 have CF_STOP
+                if (feat & ida_idp.CF_STOP):
                     return cur
-                if mnem == "nop":
+                if insn.itype == getattr(ida_idp, "LM32_INSN_NOP", -1) or insn.get_canon_mnem().lower() == "nop":
                     prev2 = ida_bytes.prev_head(prev, base)
                     if prev2 != ida_idaapi.BADADDR and ida_ua.decode_insn(insn, prev2) > 0:
-                        m2 = insn.get_canon_mnem().lower()
-                        if m2 in ("eret", "bret", "bi") or (m2 == "b" and insn.ops[0].type == ida_ua.o_reg and insn.ops[0].reg == 29):
+                        if (insn.get_canon_feature() & ida_idp.CF_STOP):
                             return cur
             cur = prev
         if cur != ea:
@@ -406,7 +474,30 @@ def decompile_program():
     if image is None:
         raise RuntimeError("lm32dec: no segments loaded")
     entries = _entries() or [base]
-    insns, calls = decoder.decode(image, entries=entries, base=base, is_be=is_be)
+
+    insns = None
+    calls = None
+    try:
+        import idautils, ida_funcs
+        all_funcs = list(idautils.Functions())
+        if all_funcs:
+            insns = {}
+            calls = set()
+            for fn_ea in all_funcs:
+                pfn = ida_funcs.get_func(fn_ea)
+                if pfn:
+                    fn_insns, fn_calls = decode_func_via_ida(pfn)
+                    if fn_insns:
+                        insns.update(fn_insns)
+                        if fn_calls:
+                            calls.update(fn_calls)
+    except Exception:
+        insns = None
+        calls = None
+
+    if not insns:
+        insns, calls = decoder.decode(image, entries=entries, base=base, is_be=is_be)
+
     _annotate_operand_names(insns)
     funcs = cfg.build_functions(insns, calls, extra_entries=entries)
     namer = IdaNamer()
@@ -460,7 +551,15 @@ def decompile_one(ea, show_casts=True):
     entry = f.start_ea if f is not None else _find_entry(image, base, ea, entset, is_be=is_be)
     entset.add(entry)
     stop = entset - {entry}
-    insns, calls = decoder.decode(image, entries=[entry], base=base, stop_at=stop, is_be=is_be)
+
+    # If f is an IDA function, decode natively using IDA's instruction decoding API
+    if f is not None:
+        insns, calls = decode_func_via_ida(f)
+    else:
+        insns, calls = None, None
+
+    if not insns:
+        insns, calls = decoder.decode(image, entries=[entry], base=base, stop_at=stop, is_be=is_be)
     _annotate_operand_names(insns)
 
     # Check if entry is a switch case fragment belonging to a parent function

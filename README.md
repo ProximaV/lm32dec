@@ -87,6 +87,7 @@ int sub_450(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int 
 
 ### 1. Dual-Endian Decoding & Zero-Flag IR Lifter 
 * **Fixed 32-bit Instruction Decoding**: Decodes all LM32 32-bit instructions with full support for both Big-Endian and Little-Endian byte orders.
+* **Structured IDA API Integration (Zero String Matching)**: Leverages IDA Pro's standard `ida_ua.decode_insn`, `insn.get_canon_mnem()`, `insn.get_canon_feature()` (`CF_STOP`, `CF_CALL`, `CF_JUMP`, `CF_CHG1`), and `op.type` / `op.reg` / `op.value` / `op.addr` APIs for instruction and operand inspection, completely eliminating brittle string parsing, regex matching, or register prefix stripping.
 * **Zero-Flag Architecture Support**: LM32 features no status/condition flags; compare-and-branch instructions (`be`, `bne`, `bge`, `bgeu`, `bgt`, `bgtu`) test registers directly. The lifter models these cleanly as high-level relational expressions.
 * **Hardwired Zero Register (`r0`)**: Reads from `r0` fold to literal `0`; writes to `r0` (used for discards or flags) are preserved as pure side effects or safely eliminated.
 * **Switch Table Identification**: Recognizes indirect branch sequences (`lshift -> add -> lw -> b rX`) and extracts jump tables, case bounds, and dispatch targets.
