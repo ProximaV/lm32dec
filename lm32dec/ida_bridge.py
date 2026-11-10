@@ -234,7 +234,7 @@ class _IdaFrameInfo:
 def _ida_frame_info(ea):
     """Read stack frame structure details and stack variable operands from IDA Pro using native API."""
     try:
-        import ida_funcs, ida_frame, ida_typeinf, ida_ua
+        import ida_funcs, ida_frame, ida_typeinf, ida_ua, ida_bytes
         from ida_idaapi import BADADDR
         pfn = ida_funcs.get_func(ea)
         if not pfn:
@@ -255,10 +255,21 @@ def _ida_frame_info(ea):
         insn = ida_ua.insn_t()
         while cur < pfn.end_ea:
             if ida_ua.decode_insn(insn, cur) > 0:
+                flags = ida_bytes.get_flags(cur)
                 for n in range(6):
                     op = insn.ops[n]
                     if op.type == ida_ua.o_void:
                         break
+                    # Filter: Only check genuine stack operands (sp/fp displaced or marked stack imm)
+                    if op.type in (ida_ua.o_displ, ida_ua.o_phrase):
+                        if op.reg not in (27, 28):  # fp, sp
+                            continue
+                    elif op.type == ida_ua.o_imm:
+                        if not ida_bytes.is_stkvar(flags, n):
+                            continue
+                    else:
+                        continue
+
                     soff = ida_frame.calc_stkvar_struc_offset(pfn, insn, n)
                     if soff != BADADDR and soff is not None:
                         if soff >= (1 << 63):
@@ -504,10 +515,12 @@ def decompile_program():
 
     # Pre-populate arity cache
     for entry, f in funcs.items():
-        frame_info = frame.analyze_frame(f)
-        opt.optimize(f)
+        import copy
+        f_copy = copy.deepcopy(f)
+        frame_info = frame.analyze_frame(f_copy)
+        opt.optimize(f_copy)
         cons = _get_caller_consensus(entry)
-        sig = abi.analyze_calling_convention(f, frame_info=frame_info, caller_consensus=cons)
+        sig = abi.analyze_calling_convention(f_copy, frame_info=frame_info, caller_consensus=cons)
         _ARITY_CACHE[entry] = len(sig.params)
         _RET_CACHE[entry] = sig.ret_type
 

@@ -213,8 +213,12 @@ def analyze_calling_convention(func, frame_info=None, user_proto=None, func_name
 
     # Stack parameters arg_0, arg_4, ...
     if stack_args:
+        seen_names = {p.name for p in params}
         for off in sorted(stack_args):
             name, width = stack_args[off]
+            if name in seen_names:
+                continue
+            seen_names.add(name)
             t_str = "int" if width == 4 else ("short" if width == 2 else "char")
             params.append(Param(name=name, type_str=t_str, location=f"[sp+{off}]"))
 

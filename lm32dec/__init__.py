@@ -62,11 +62,13 @@ def decompile_image(image, entries, base=0, is_be=True, code_names=None):
     namer = Namer(code_names=code_names)
 
     # 1. Pre-compute calling conventions and arities
+    import copy
     arity = {}
     for entry, f in funcs.items():
-        frame_info = frame.analyze_frame(f)
-        opt.optimize(f)
-        sig = abi.analyze_calling_convention(f, frame_info=frame_info)
+        f_copy = copy.deepcopy(f)
+        frame_info = frame.analyze_frame(f_copy)
+        opt.optimize(f_copy)
+        sig = abi.analyze_calling_convention(f_copy, frame_info=frame_info)
         arity[entry] = len(sig.params)
 
     # 2. Decompile each function with virtual variable recovery

@@ -60,7 +60,7 @@ def test_frame_spill_cleanup():
         ir.Assign(0x3000, ir.Reg("sp"), ir.Bin("+", ir.Reg("sp"), ir.Const(-16))),
         ir.Assign(0x3004, ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(4))), ir.Reg("ra")),
         ir.Assign(0x3008, ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(8))), ir.Reg("r11")),
-        # Some actual work using stack slot sp+12 (local var_4)
+        # Some actual work using stack slot sp+12 (local var_8 in 16-byte frame: 16 - 12 + 4 = 8)
         ir.Assign(0x300C, ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(12))), ir.Const(0xCAFE)),
         ir.Assign(0x3010, ir.Reg("r1"), ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(12)))),
         ir.Assign(0x3014, ir.Reg("r11"), ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(8)))),
@@ -75,9 +75,60 @@ def test_frame_spill_cleanup():
     # Only the local var slot and return should remain
     remaining = b0.stmts
     assert len(remaining) == 3
-    assert isinstance(remaining[0].dst, ir.Reg) and remaining[0].dst.name == "var_4"
-    assert isinstance(remaining[1].src, ir.Reg) and remaining[1].src.name == "var_4"
+    assert isinstance(remaining[0].dst, ir.Reg) and remaining[0].dst.name == "var_8"
+    assert isinstance(remaining[1].src, ir.Reg) and remaining[1].src.name == "var_8"
     assert isinstance(remaining[2], ir.Ret)
+
+
+def test_frame_saved_slot_at_frame_size():
+    # Frame size 8: saving ra at sp+4 and r11 at sp+8 (at frame_size boundary)
+    f = cfg.Func(0x3100)
+    b0 = cfg.Block(0x3100)
+    b0.term = "ret"
+    b0.stmts = [
+        ir.Assign(0x3100, ir.Reg("sp"), ir.Bin("+", ir.Reg("sp"), ir.Const(-8))),
+        ir.Assign(0x3104, ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(4))), ir.Reg("ra")),
+        ir.Assign(0x3108, ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(8))), ir.Reg("r11")),
+        ir.Assign(0x310C, ir.Reg("r1"), ir.Const(100)),
+        ir.Assign(0x3110, ir.Reg("r11"), ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(8)))),
+        ir.Assign(0x3114, ir.Reg("ra"), ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(4)))),
+        ir.Assign(0x3118, ir.Reg("sp"), ir.Bin("+", ir.Reg("sp"), ir.Const(8))),
+        ir.Ret(0x311C, "ret"),
+    ]
+    f.blocks[0x3100] = b0
+
+    frame_info = frame.analyze_frame(f)
+    # Callee saves at sp+8 must be stripped, NOT converted into fake arg_0
+    assert not frame_info.stack_args
+    assert not frame_info.locals
+    remaining = b0.stmts
+    assert len(remaining) == 2  # r1 = 100, ret
+    assert isinstance(remaining[0], ir.Assign) and remaining[0].dst.name == "r1"
+    sig = abi.analyze_calling_convention(f, frame_info=frame_info)
+    assert len(sig.params) == 0  # No fake a0..a7 or arg_0!
+
+
+def test_frame_incoming_stack_argument():
+    # Frame size 16: reads caller stack argument at sp + 16 + 4 = sp + 20
+    f = cfg.Func(0x3200)
+    b0 = cfg.Block(0x3200)
+    b0.term = "ret"
+    b0.stmts = [
+        ir.Assign(0x3200, ir.Reg("sp"), ir.Bin("+", ir.Reg("sp"), ir.Const(-16))),
+        ir.Assign(0x3204, ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(4))), ir.Reg("ra")),
+        ir.Assign(0x3208, ir.Reg("r1"), ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(20)))),
+        ir.Assign(0x320C, ir.Reg("ra"), ir.Mem(ir.Bin("+", ir.Reg("sp"), ir.Const(4)))),
+        ir.Assign(0x3210, ir.Reg("sp"), ir.Bin("+", ir.Reg("sp"), ir.Const(16))),
+        ir.Ret(0x3214, "ret"),
+    ]
+    f.blocks[0x3200] = b0
+
+    frame_info = frame.analyze_frame(f)
+    assert 0 in frame_info.stack_args
+    assert frame_info.stack_args[0][0] == "arg_0"
+    sig = abi.analyze_calling_convention(f, frame_info=frame_info)
+    assert any(p.name == "arg_0" for p in sig.params)
+    assert len(sig.params) == 9  # a0..a7 + arg_0
 
 
 def test_callargs_folding():
